@@ -25,6 +25,10 @@ __all__ = [
     "validate_null_constraints",
     "validate_unique_constraints",
     "validate_allowed_values",
+    "validate_custom_rules",
+    "get_null_violations",
+    "get_unique_violations",
+    "get_allowed_values_violations",
     "filter_by_condition",
     "normalize_numeric_columns",
     "cast_column_types",
@@ -259,6 +263,81 @@ def validate_null_constraints(
     return results
 
 
+def get_null_violations(
+    df: pd.DataFrame,
+    columns: Optional[Sequence[str]] = None,
+    max_missing_ratio: float = 0.0,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Compute detailed null value violation metrics for specified columns.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The pandas DataFrame to inspect.
+    columns : Optional[Sequence[str]], default None
+        Sequence of column names to evaluate. If None, all columns are evaluated.
+    max_missing_ratio : float, default 0.0
+        Maximum allowable missing ratio [0.0, 1.0].
+
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        Diagnostics dictionary mapping each column to:
+        - 'missing_count' (int): Total null/missing values in column.
+        - 'missing_ratio' (float): Ratio of missing values to total rows.
+        - 'max_allowed_ratio' (float): Threshold configured.
+        - 'passed' (bool): True if missing_ratio <= max_missing_ratio.
+
+    Raises
+    ------
+    TypeError
+        If df is not a pd.DataFrame or max_missing_ratio is not numeric.
+    ValueError
+        If max_missing_ratio is outside [0.0, 1.0].
+    KeyError
+        If any specified column is missing from df.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"Expected input of type pd.DataFrame, got {type(df).__name__}")
+
+    if not isinstance(max_missing_ratio, (int, float)) or isinstance(max_missing_ratio, bool):
+        raise TypeError(f"Expected numeric max_missing_ratio, got {type(max_missing_ratio).__name__}")
+
+    if not (0.0 <= max_missing_ratio <= 1.0):
+        raise ValueError(
+            f"max_missing_ratio must be between 0.0 and 1.0 inclusive, got {max_missing_ratio}."
+        )
+
+    cols = list(columns) if columns is not None else list(df.columns)
+    for col in cols:
+        if col not in df.columns:
+            raise KeyError(f"Column '{col}' specified in columns not found in DataFrame.")
+
+    total_rows = len(df)
+    diagnostics: Dict[str, Dict[str, Any]] = {}
+    for col in cols:
+        if total_rows == 0:
+            diagnostics[col] = {
+                "missing_count": 0,
+                "missing_ratio": 0.0,
+                "max_allowed_ratio": float(max_missing_ratio),
+                "passed": True,
+            }
+            continue
+
+        missing_count = int(df[col].isna().sum())
+        missing_ratio = float(missing_count / total_rows)
+        diagnostics[col] = {
+            "missing_count": missing_count,
+            "missing_ratio": missing_ratio,
+            "max_allowed_ratio": float(max_missing_ratio),
+            "passed": bool(missing_ratio <= max_missing_ratio),
+        }
+
+    return diagnostics
+
+
 def validate_unique_constraints(
     df: pd.DataFrame,
     columns: Union[str, Sequence[str]],
@@ -336,11 +415,106 @@ def validate_unique_constraints(
     return is_unique
 
 
+def get_unique_violations(
+    df: pd.DataFrame,
+    columns: Union[str, Sequence[str]],
+    allow_na: bool = False,
+) -> Dict[str, Any]:
+    """
+    Inspect duplicate records and compile violation diagnostics for uniqueness constraints.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The pandas DataFrame to inspect.
+    columns : Union[str, Sequence[str]]
+        A single column name or sequence of column names forming the uniqueness key.
+    allow_na : bool, default False
+        Whether null/NaN values are ignored during uniqueness checks.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Diagnostics dictionary containing:
+        - 'columns' (List[str]): List of column names evaluated.
+        - 'is_unique' (bool): True if all records are unique across columns.
+        - 'duplicate_count' (int): Total number of duplicate rows found.
+        - 'sample_duplicates' (List[Any]): Up to 5 sample duplicate values or tuples.
+
+    Raises
+    ------
+    TypeError
+        If df is not a pd.DataFrame or columns argument is invalid.
+    KeyError
+        If any specified column is missing from df.
+    ValueError
+        If columns is empty.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"Expected input of type pd.DataFrame, got {type(df).__name__}")
+
+    if isinstance(columns, str):
+        cols = [columns]
+    elif isinstance(columns, (list, tuple, Sequence)):
+        cols = list(columns)
+    else:
+        raise TypeError(f"Expected columns to be str or Sequence[str], got {type(columns).__name__}")
+
+    if not cols:
+        raise ValueError("columns cannot be empty.")
+
+    for col in cols:
+        if col not in df.columns:
+            raise KeyError(f"Column '{col}' specified in columns not found in DataFrame.")
+
+    if df.empty:
+        return {
+            "columns": cols,
+            "is_unique": True,
+            "duplicate_count": 0,
+            "sample_duplicates": [],
+        }
+
+    subset = df[cols]
+    if not allow_na and bool(subset.isna().any().any()):
+        null_count = int(subset.isna().any(axis=1).sum())
+        return {
+            "columns": cols,
+            "is_unique": False,
+            "duplicate_count": null_count,
+            "sample_duplicates": ["<null_entry>"],
+            "has_nulls": True,
+        }
+
+    if allow_na:
+        subset = subset.dropna()
+
+    dup_mask = subset.duplicated(keep=False)
+    dup_rows = subset[dup_mask]
+    dup_count = int(subset.duplicated().sum())
+
+    sample_dups: List[Any] = []
+    if not dup_rows.empty:
+        if len(cols) == 1:
+            sample_dups = list(dup_rows[cols[0]].unique()[:5])
+        else:
+            sample_dups = [tuple(x) for x in dup_rows.drop_duplicates().values[:5]]
+
+    return {
+        "columns": cols,
+        "is_unique": dup_count == 0,
+        "duplicate_count": dup_count,
+        "sample_duplicates": sample_dups,
+    }
+
+
 def validate_allowed_values(
     df: pd.DataFrame,
     allowed_values: Mapping[str, Sequence[Any]],
     allow_null: bool = True,
     raise_on_error: bool = False,
+    ignore_case: bool = False,
+    strip_whitespace: bool = False,
 ) -> Dict[str, bool]:
     """
     Validate that values in specified columns belong to an allowed set of discrete values.
@@ -355,6 +529,10 @@ def validate_allowed_values(
         Whether null/NaN values are considered permissible.
     raise_on_error : bool, default False
         Whether to raise a ValueError if invalid values are encountered.
+    ignore_case : bool, default False
+        Whether string comparisons should ignore case differences.
+    strip_whitespace : bool, default False
+        Whether string values should have surrounding whitespace stripped before validation.
 
     Returns
     -------
@@ -394,14 +572,169 @@ def validate_allowed_values(
             results[col] = True
             continue
 
-        valid_collection = set(valid_set)
-        is_valid = bool(series.isin(valid_collection).all())
+        if ignore_case or strip_whitespace:
+            def _norm(val: Any) -> Any:
+                if isinstance(val, str):
+                    if strip_whitespace:
+                        val = val.strip()
+                    if ignore_case:
+                        val = val.lower()
+                return val
+
+            normalized_series = series.map(_norm)
+            normalized_valid = {_norm(v) for v in valid_set}
+            is_valid = bool(normalized_series.isin(normalized_valid).all())
+        else:
+            valid_collection = set(valid_set)
+            is_valid = bool(series.isin(valid_collection).all())
+
         results[col] = is_valid
 
     if raise_on_error:
         failed = [col for col, ok in results.items() if not ok]
         if failed:
             raise ValueError(f"Allowed values constraint violated for columns: {failed}")
+
+    return results
+
+
+def get_allowed_values_violations(
+    df: pd.DataFrame,
+    allowed_values: Mapping[str, Sequence[Any]],
+    allow_null: bool = True,
+    ignore_case: bool = False,
+    strip_whitespace: bool = False,
+) -> Dict[str, List[Any]]:
+    """
+    Identify distinct unexpected values violating categorical domain constraints.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Target DataFrame to inspect.
+    allowed_values : Mapping[str, Sequence[Any]]
+        Mapping of column names to valid/permitted discrete values.
+    allow_null : bool, default True
+        Whether null/NaN values are considered permissible.
+    ignore_case : bool, default False
+        Whether string values are compared case-insensitively.
+    strip_whitespace : bool, default False
+        Whether leading/trailing whitespace is stripped before comparison.
+
+    Returns
+    -------
+    Dict[str, List[Any]]
+        Dictionary mapping each column to a list of distinct unexpected values observed.
+
+    Raises
+    ------
+    TypeError
+        If df is not a pd.DataFrame or allowed_values is not a Mapping.
+    KeyError
+        If any specified column in allowed_values is missing from df.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"Expected input of type pd.DataFrame, got {type(df).__name__}")
+
+    if not isinstance(allowed_values, Mapping):
+        raise TypeError(f"Expected allowed_values to be a Mapping, got {type(allowed_values).__name__}")
+
+    violations: Dict[str, List[Any]] = {}
+
+    for col, valid_set in allowed_values.items():
+        if col not in df.columns:
+            raise KeyError(f"Column '{col}' specified in allowed_values not found in DataFrame.")
+
+        series = df[col]
+        if allow_null:
+            series = series.dropna()
+
+        if series.empty:
+            violations[col] = []
+            continue
+
+        if ignore_case or strip_whitespace:
+            def _norm(val: Any) -> Any:
+                if isinstance(val, str):
+                    if strip_whitespace:
+                        val = val.strip()
+                    if ignore_case:
+                        val = val.lower()
+                return val
+
+            normalized_valid = {_norm(v) for v in valid_set}
+            bad_mask = ~series.map(_norm).isin(normalized_valid)
+        else:
+            valid_collection = set(valid_set)
+            bad_mask = ~series.isin(valid_collection)
+
+        unexpected = list(series[bad_mask].unique())
+        violations[col] = unexpected
+
+    return violations
+
+
+def validate_custom_rules(
+    df: pd.DataFrame,
+    rules: Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]],
+    raise_on_error: bool = False,
+) -> Dict[str, bool]:
+    """
+    Validate custom user-defined validation rules against a DataFrame.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Target DataFrame to validate.
+    rules : Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]]
+        Mapping from rule names to callables. Each callable accepts df and returns either
+        a boolean or a boolean Series.
+    raise_on_error : bool, default False
+        Whether to raise ValueError immediately if any custom rule fails.
+
+    Returns
+    -------
+    Dict[str, bool]
+        Mapping from rule name to boolean indicating whether the rule passed completely.
+
+    Raises
+    ------
+    TypeError
+        If df is not a pd.DataFrame or rules is not a Mapping.
+    ValueError
+        If rules is empty, or if raise_on_error is True and any rule fails.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"Expected input of type pd.DataFrame, got {type(df).__name__}")
+
+    if not isinstance(rules, Mapping):
+        raise TypeError(f"Expected rules to be a Mapping, got {type(rules).__name__}")
+
+    if not rules:
+        raise ValueError("rules mapping cannot be empty.")
+
+    results: Dict[str, bool] = {}
+
+    for rule_name, rule_fn in rules.items():
+        try:
+            res = rule_fn(df)
+            if isinstance(res, pd.Series):
+                passed = bool(res.all())
+            elif isinstance(res, bool):
+                passed = res
+            else:
+                passed = bool(res)
+        except Exception as err:
+            if raise_on_error:
+                raise ValueError(f"Custom rule '{rule_name}' raised error: {err}") from err
+            passed = False
+
+        results[rule_name] = passed
+
+    if raise_on_error:
+        failed_rules = [r for r, ok in results.items() if not ok]
+        if failed_rules:
+            raise ValueError(f"Custom validation rule(s) failed: {failed_rules}")
 
     return results
 
@@ -996,8 +1329,12 @@ class DataValidator(BaseDataProcessor):
         non_null_columns: Optional[Sequence[str]] = None,
         unique_columns: Optional[Union[str, Sequence[str]]] = None,
         allowed_values: Optional[Mapping[str, Sequence[Any]]] = None,
+        custom_rules: Optional[Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]]] = None,
         max_missing_ratio: float = 0.0,
         allow_empty: bool = False,
+        error_mode: str = "raise",
+        ignore_case: bool = False,
+        strip_whitespace: bool = False,
         name: Optional[str] = None,
     ) -> None:
         """
@@ -1017,10 +1354,18 @@ class DataValidator(BaseDataProcessor):
             Column or list of columns required to have unique values.
         allowed_values : Optional[Mapping[str, Sequence[Any]]], default None
             Categorical columns mapped to permitted discrete values.
+        custom_rules : Optional[Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]]], default None
+            Mapping of custom rule names to validation predicate functions.
         max_missing_ratio : float, default 0.0
             Allowed proportion of missing values for non-null checks.
         allow_empty : bool, default False
             Whether empty DataFrames are allowed.
+        error_mode : str, default 'raise'
+            Strategy when validation violations occur: 'raise', 'warn', or 'quarantine'.
+        ignore_case : bool, default False
+            Whether allowed values validation ignores case for strings.
+        strip_whitespace : bool, default False
+            Whether allowed values validation strips whitespace for strings.
         name : Optional[str], default None
             Custom identifier name.
         """
@@ -1031,8 +1376,15 @@ class DataValidator(BaseDataProcessor):
         self.non_null_columns: Optional[Sequence[str]] = non_null_columns
         self.unique_columns: Optional[Union[str, Sequence[str]]] = unique_columns
         self.allowed_values: Optional[Mapping[str, Sequence[Any]]] = allowed_values
+        self.custom_rules: Optional[Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]]] = custom_rules
         self.max_missing_ratio: float = max_missing_ratio
         self.allow_empty: bool = allow_empty
+        self.error_mode: str = error_mode.lower() if isinstance(error_mode, str) else "raise"
+        if self.error_mode not in ("raise", "warn", "quarantine"):
+            raise ValueError(f"Invalid error_mode '{error_mode}'. Supported modes: 'raise', 'warn', 'quarantine'.")
+        self.ignore_case: bool = ignore_case
+        self.strip_whitespace: bool = strip_whitespace
+        self.quarantined_data: Optional[pd.DataFrame] = None
 
     def validate_schema(
         self,
@@ -1177,6 +1529,8 @@ class DataValidator(BaseDataProcessor):
         allowed_values: Optional[Mapping[str, Sequence[Any]]] = None,
         allow_null: bool = True,
         raise_on_error: bool = False,
+        ignore_case: Optional[bool] = None,
+        strip_whitespace: Optional[bool] = None,
     ) -> Dict[str, bool]:
         """
         Validate discrete allowed values on categorical columns.
@@ -1191,6 +1545,10 @@ class DataValidator(BaseDataProcessor):
             Whether null values are permissible.
         raise_on_error : bool, default False
             Whether to raise on violation.
+        ignore_case : Optional[bool], default None
+            Whether to ignore case differences, defaults to self.ignore_case.
+        strip_whitespace : Optional[bool], default None
+            Whether to strip string whitespace, defaults to self.strip_whitespace.
 
         Returns
         -------
@@ -1200,14 +1558,77 @@ class DataValidator(BaseDataProcessor):
         target_allowed = allowed_values if allowed_values is not None else self.allowed_values
         if target_allowed is None:
             raise ValueError("No allowed values mapping provided or configured on DataValidator.")
+        ic = ignore_case if ignore_case is not None else self.ignore_case
+        sw = strip_whitespace if strip_whitespace is not None else self.strip_whitespace
         results = validate_allowed_values(
             df,
             allowed_values=target_allowed,
             allow_null=allow_null,
             raise_on_error=raise_on_error,
+            ignore_case=ic,
+            strip_whitespace=sw,
         )
         self.log_step("validate_allowed_values", {"results": results})
         return results
+
+    def validate_custom_rules(
+        self,
+        df: pd.DataFrame,
+        rules: Optional[Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]]] = None,
+        raise_on_error: bool = False,
+    ) -> Dict[str, bool]:
+        """Validate custom predicate rules on a DataFrame."""
+        target_rules = rules if rules is not None else self.custom_rules
+        if target_rules is None:
+            raise ValueError("No custom rules provided or configured on DataValidator.")
+        results = validate_custom_rules(df, rules=target_rules, raise_on_error=raise_on_error)
+        self.log_step("validate_custom_rules", {"results": results})
+        return results
+
+    def get_allowed_values_violations(
+        self,
+        df: pd.DataFrame,
+        allowed_values: Optional[Mapping[str, Sequence[Any]]] = None,
+        allow_null: bool = True,
+        ignore_case: Optional[bool] = None,
+        strip_whitespace: Optional[bool] = None,
+    ) -> Dict[str, List[Any]]:
+        """Identify unexpected values violating allowed values constraint."""
+        target_allowed = allowed_values if allowed_values is not None else self.allowed_values
+        if target_allowed is None:
+            raise ValueError("No allowed values mapping provided or configured on DataValidator.")
+        ic = ignore_case if ignore_case is not None else self.ignore_case
+        sw = strip_whitespace if strip_whitespace is not None else self.strip_whitespace
+        return get_allowed_values_violations(
+            df,
+            allowed_values=target_allowed,
+            allow_null=allow_null,
+            ignore_case=ic,
+            strip_whitespace=sw,
+        )
+
+    def get_unique_violations(
+        self,
+        df: pd.DataFrame,
+        columns: Optional[Union[str, Sequence[str]]] = None,
+        allow_na: bool = False,
+    ) -> Dict[str, Any]:
+        """Compile violation diagnostics for uniqueness constraints."""
+        target_cols = columns if columns is not None else self.unique_columns
+        if target_cols is None:
+            raise ValueError("No uniqueness columns provided or configured on DataValidator.")
+        return get_unique_violations(df, columns=target_cols, allow_na=allow_na)
+
+    def get_null_violations(
+        self,
+        df: pd.DataFrame,
+        columns: Optional[Sequence[str]] = None,
+        max_missing_ratio: Optional[float] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Compile detailed null value violation metrics."""
+        target_cols = columns if columns is not None else self.non_null_columns
+        ratio = max_missing_ratio if max_missing_ratio is not None else self.max_missing_ratio
+        return get_null_violations(df, columns=target_cols, max_missing_ratio=ratio)
 
     def process(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1221,19 +1642,151 @@ class DataValidator(BaseDataProcessor):
         Returns
         -------
         pd.DataFrame
-            A defensive copy of the DataFrame if validation succeeds.
+            A defensive copy of the DataFrame (or cleaned subset in quarantine mode).
 
         Raises
         ------
         ValueError
-            If required columns are missing, DataFrame is empty, ranges fail,
-            null constraints fail, or uniqueness constraints fail.
+            If constraints fail in 'raise' error_mode.
         TypeError
             If input is not a DataFrame or column types mismatch.
         """
         if not isinstance(df, pd.DataFrame):
             raise TypeError(f"Expected pd.DataFrame, got {type(df).__name__}")
 
+        if self.error_mode == "warn":
+            if self.required_columns is not None:
+                try:
+                    self.validate_schema(
+                        df,
+                        required_columns=self.required_columns,
+                        column_types=self.column_types,
+                        allow_empty=self.allow_empty,
+                    )
+                except Exception as err:
+                    self.log_step("warning_schema", {"error": str(err)})
+
+            if self.bounds is not None:
+                try:
+                    r_res = self.validate_column_ranges(df, bounds=self.bounds)
+                    bad = [c for c, ok in r_res.items() if not ok]
+                    if bad:
+                        self.log_step("warning_range_bounds", {"failed_columns": bad})
+                except Exception as err:
+                    self.log_step("warning_range_bounds", {"error": str(err)})
+
+            if self.non_null_columns is not None:
+                try:
+                    n_res = self.validate_null_constraints(
+                        df,
+                        columns=self.non_null_columns,
+                        max_missing_ratio=self.max_missing_ratio,
+                        raise_on_error=False,
+                    )
+                    bad = [c for c, ok in n_res.items() if not ok]
+                    if bad:
+                        self.log_step("warning_null_constraints", {"failed_columns": bad})
+                except Exception as err:
+                    self.log_step("warning_null_constraints", {"error": str(err)})
+
+            if self.unique_columns is not None:
+                try:
+                    u_ok = self.validate_unique_constraints(
+                        df,
+                        columns=self.unique_columns,
+                        raise_on_error=False,
+                    )
+                    if not u_ok:
+                        self.log_step("warning_unique_constraints", {"columns": self.unique_columns})
+                except Exception as err:
+                    self.log_step("warning_unique_constraints", {"error": str(err)})
+
+            if self.allowed_values is not None:
+                try:
+                    a_res = self.validate_allowed_values(
+                        df,
+                        allowed_values=self.allowed_values,
+                        raise_on_error=False,
+                    )
+                    bad = [c for c, ok in a_res.items() if not ok]
+                    if bad:
+                        self.log_step("warning_allowed_values", {"failed_columns": bad})
+                except Exception as err:
+                    self.log_step("warning_allowed_values", {"error": str(err)})
+
+            if self.custom_rules is not None:
+                try:
+                    c_res = self.validate_custom_rules(
+                        df,
+                        rules=self.custom_rules,
+                        raise_on_error=False,
+                    )
+                    bad = [r for r, ok in c_res.items() if not ok]
+                    if bad:
+                        self.log_step("warning_custom_rules", {"failed_rules": bad})
+                except Exception as err:
+                    self.log_step("warning_custom_rules", {"error": str(err)})
+
+            self.log_step("process_validation_warn_mode", {"rows_validated": len(df)})
+            return df.copy()
+
+        if self.error_mode == "quarantine":
+            bad_indices: set[Any] = set()
+
+            if self.non_null_columns is not None:
+                for col in self.non_null_columns:
+                    if col in df.columns:
+                        bad_indices.update(df[df[col].isna()].index)
+
+            if self.unique_columns is not None:
+                u_cols = [self.unique_columns] if isinstance(self.unique_columns, str) else list(self.unique_columns)
+                if all(c in df.columns for c in u_cols):
+                    bad_indices.update(df[df.duplicated(subset=u_cols, keep="first")].index)
+
+            if self.bounds is not None:
+                for col, (min_v, max_v) in self.bounds.items():
+                    if col in df.columns:
+                        s = pd.to_numeric(df[col], errors="coerce")
+                        if min_v is not None:
+                            bad_indices.update(df[s < min_v].index)
+                        if max_v is not None:
+                            bad_indices.update(df[s > max_v].index)
+
+            if self.allowed_values is not None:
+                for col, valid_set in self.allowed_values.items():
+                    if col in df.columns:
+                        series = df[col]
+                        if self.ignore_case or self.strip_whitespace:
+                            def _n(val: Any) -> Any:
+                                if isinstance(val, str):
+                                    if self.strip_whitespace:
+                                        val = val.strip()
+                                    if self.ignore_case:
+                                        val = val.lower()
+                                return val
+                            norm_valid = {_n(v) for v in valid_set}
+                            bad_indices.update(df[~series.dropna().map(_n).isin(norm_valid)].index)
+                        else:
+                            bad_indices.update(df[~series.dropna().isin(set(valid_set))].index)
+
+            if self.custom_rules is not None:
+                for rule_name, rule_fn in self.custom_rules.items():
+                    res = rule_fn(df)
+                    if isinstance(res, pd.Series):
+                        bad_indices.update(df[~res].index)
+
+            bad_list = sorted(list(bad_indices))
+            quarantine_df = df.loc[bad_list].copy() if bad_list else pd.DataFrame(columns=df.columns)
+            clean_df = df.drop(index=bad_list).copy() if bad_list else df.copy()
+            self.quarantined_data = quarantine_df
+            self.log_step("quarantine_validation", {
+                "total_rows": len(df),
+                "quarantined_rows": len(quarantine_df),
+                "clean_rows": len(clean_df),
+            })
+            return clean_df
+
+        # Default error_mode == "raise"
         if self.required_columns is not None:
             self.validate_schema(
                 df,
@@ -1267,6 +1820,13 @@ class DataValidator(BaseDataProcessor):
             self.validate_allowed_values(
                 df,
                 allowed_values=self.allowed_values,
+                raise_on_error=True,
+            )
+
+        if self.custom_rules is not None:
+            self.validate_custom_rules(
+                df,
+                rules=self.custom_rules,
                 raise_on_error=True,
             )
 
@@ -1696,6 +2256,8 @@ class DataProcessor(BaseDataProcessor):
         df: Optional[pd.DataFrame] = None,
         allow_null: bool = True,
         raise_on_error: bool = False,
+        ignore_case: bool = False,
+        strip_whitespace: bool = False,
     ) -> Dict[str, bool]:
         """Validate categorical allowed values on provided DataFrame or internal state."""
         target_df = df if df is not None else self.get_data()
@@ -1704,9 +2266,73 @@ class DataProcessor(BaseDataProcessor):
             allowed_values=allowed_values,
             allow_null=allow_null,
             raise_on_error=raise_on_error,
+            ignore_case=ignore_case,
+            strip_whitespace=strip_whitespace,
         )
         self.log_step("validate_allowed_values", {"results": result})
         return result
+
+    def validate_custom_rules(
+        self,
+        rules: Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]],
+        df: Optional[pd.DataFrame] = None,
+        raise_on_error: bool = False,
+    ) -> Dict[str, bool]:
+        """Validate custom rules on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        result = self.validator.validate_custom_rules(
+            target_df,
+            rules=rules,
+            raise_on_error=raise_on_error,
+        )
+        self.log_step("validate_custom_rules", {"results": result})
+        return result
+
+    def get_allowed_values_violations(
+        self,
+        allowed_values: Mapping[str, Sequence[Any]],
+        df: Optional[pd.DataFrame] = None,
+        allow_null: bool = True,
+        ignore_case: bool = False,
+        strip_whitespace: bool = False,
+    ) -> Dict[str, List[Any]]:
+        """Identify unexpected categorical values on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        return self.validator.get_allowed_values_violations(
+            target_df,
+            allowed_values=allowed_values,
+            allow_null=allow_null,
+            ignore_case=ignore_case,
+            strip_whitespace=strip_whitespace,
+        )
+
+    def get_unique_violations(
+        self,
+        columns: Union[str, Sequence[str]],
+        df: Optional[pd.DataFrame] = None,
+        allow_na: bool = False,
+    ) -> Dict[str, Any]:
+        """Compile uniqueness violation diagnostics on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        return self.validator.get_unique_violations(
+            target_df,
+            columns=columns,
+            allow_na=allow_na,
+        )
+
+    def get_null_violations(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        columns: Optional[Sequence[str]] = None,
+        max_missing_ratio: float = 0.0,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Compile null violation diagnostics on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        return self.validator.get_null_violations(
+            target_df,
+            columns=columns,
+            max_missing_ratio=max_missing_ratio,
+        )
 
     # Transformation Method Group
     def filter_by_condition(

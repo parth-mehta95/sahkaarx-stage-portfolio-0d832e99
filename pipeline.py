@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 import pandas as pd  # type: ignore[import-untyped]
 
 from data_loader import BaseDataLoader, DataLoader
@@ -21,8 +21,12 @@ from data_processor import (
     DataProcessor,
     DataTransformer,
     DataValidator,
+    get_allowed_values_violations,
+    get_null_violations,
+    get_unique_violations,
     validate_allowed_values,
     validate_column_ranges,
+    validate_custom_rules,
     validate_null_constraints,
     validate_schema,
     validate_unique_constraints,
@@ -36,6 +40,10 @@ __all__ = [
     "validate_pipeline_data",
     "validate_null_constraints",
     "validate_unique_constraints",
+    "validate_custom_rules",
+    "get_allowed_values_violations",
+    "get_unique_violations",
+    "get_null_violations",
 ]
 
 
@@ -180,8 +188,12 @@ class DataPipeline(BasePipeline):
         non_null_columns: Optional[Sequence[str]] = None,
         unique_columns: Optional[Union[str, Sequence[str]]] = None,
         allowed_values: Optional[Mapping[str, Sequence[Any]]] = None,
+        custom_rules: Optional[Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]]] = None,
         max_missing_ratio: float = 0.0,
         allow_empty: bool = False,
+        error_mode: str = "raise",
+        ignore_case: bool = False,
+        strip_whitespace: bool = False,
         name: Optional[str] = None,
     ) -> DataPipeline:
         """
@@ -220,11 +232,29 @@ class DataPipeline(BasePipeline):
             non_null_columns=non_null_columns,
             unique_columns=unique_columns,
             allowed_values=allowed_values,
+            custom_rules=custom_rules,
             max_missing_ratio=max_missing_ratio,
             allow_empty=allow_empty,
+            error_mode=error_mode,
+            ignore_case=ignore_case,
+            strip_whitespace=strip_whitespace,
             name=name or "PipelineDataValidator",
         )
         return self.add_processor(validator)
+
+    @property
+    def quarantined_data(self) -> Optional[pd.DataFrame]:
+        """
+        Retrieve combined DataFrame of all records quarantined across DataValidator stages.
+        """
+        quarantined_dfs = [
+            proc.quarantined_data
+            for proc in self._processors
+            if isinstance(proc, DataValidator) and proc.quarantined_data is not None and not proc.quarantined_data.empty
+        ]
+        if not quarantined_dfs:
+            return None
+        return pd.concat(quarantined_dfs, ignore_index=True)
 
     def clear_processors(self) -> DataPipeline:
         """Clear all registered processor stages."""
@@ -322,9 +352,12 @@ class DataPipeline(BasePipeline):
         unique_columns: Optional[Union[str, Sequence[str]]] = None,
         bounds: Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]] = None,
         allowed_values: Optional[Mapping[str, Sequence[Any]]] = None,
+        custom_rules: Optional[Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]]] = None,
         max_missing_ratio: float = 0.0,
         allow_empty: bool = False,
         raise_on_error: bool = True,
+        ignore_case: bool = False,
+        strip_whitespace: bool = False,
     ) -> Dict[str, Any]:
         """
         Validate an explicit DataFrame or data loaded from pipeline's loader.
@@ -374,9 +407,12 @@ class DataPipeline(BasePipeline):
             unique_columns=unique_columns,
             bounds=bounds,
             allowed_values=allowed_values,
+            custom_rules=custom_rules,
             max_missing_ratio=max_missing_ratio,
             allow_empty=allow_empty,
             raise_on_error=raise_on_error,
+            ignore_case=ignore_case,
+            strip_whitespace=strip_whitespace,
         )
         duration = time.perf_counter() - start_time
 
@@ -404,9 +440,12 @@ def validate_pipeline_data(
     unique_columns: Optional[Union[str, Sequence[str]]] = None,
     bounds: Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]] = None,
     allowed_values: Optional[Mapping[str, Sequence[Any]]] = None,
+    custom_rules: Optional[Mapping[str, Callable[[pd.DataFrame], Union[bool, pd.Series]]]] = None,
     max_missing_ratio: float = 0.0,
     allow_empty: bool = False,
     raise_on_error: bool = True,
+    ignore_case: bool = False,
+    strip_whitespace: bool = False,
 ) -> Dict[str, Any]:
     """
     Validate tabular data entering, traversing, or exiting the data pipeline.
@@ -512,6 +551,11 @@ def validate_pipeline_data(
                 raise_on_error=raise_on_error,
             )
             details["null_constraints"] = null_res
+            details["null_diagnostics"] = get_null_violations(
+                df,
+                columns=non_null_columns,
+                max_missing_ratio=max_missing_ratio,
+            )
             failed_null = [col for col, ok in null_res.items() if not ok]
             if failed_null:
                 err_msg = f"Null constraint violated for columns: {failed_null}"
@@ -528,15 +572,17 @@ def validate_pipeline_data(
     if unique_columns is not None:
         checks_performed.append("unique_constraints")
         try:
-            is_unique = validate_unique_constraints(
+            uniq_diag = get_unique_violations(
                 df,
                 columns=unique_columns,
                 allow_na=False,
-                raise_on_error=raise_on_error,
             )
+            is_unique = uniq_diag["is_unique"]
             details["unique_constraints"] = {
                 "columns": unique_columns if isinstance(unique_columns, str) else list(unique_columns),
                 "is_unique": is_unique,
+                "duplicate_count": uniq_diag["duplicate_count"],
+                "sample_duplicates": uniq_diag["sample_duplicates"],
             }
             if not is_unique:
                 err_msg = f"Uniqueness constraint violated for column(s): {unique_columns}"
@@ -576,8 +622,17 @@ def validate_pipeline_data(
                 allowed_values=allowed_values,
                 allow_null=True,
                 raise_on_error=raise_on_error,
+                ignore_case=ignore_case,
+                strip_whitespace=strip_whitespace,
             )
             details["allowed_values"] = allowed_res
+            details["allowed_values_violations"] = get_allowed_values_violations(
+                df,
+                allowed_values=allowed_values,
+                allow_null=True,
+                ignore_case=ignore_case,
+                strip_whitespace=strip_whitespace,
+            )
             failed_allowed = [col for col, ok in allowed_res.items() if not ok]
             if failed_allowed:
                 err_msg = f"Allowed values constraint violated for columns: {failed_allowed}"
@@ -586,6 +641,28 @@ def validate_pipeline_data(
                     raise ValueError(err_msg)
         except (TypeError, ValueError, KeyError) as err:
             details["allowed_values"] = {"error": str(err)}
+            errors.append(str(err))
+            if raise_on_error:
+                raise
+
+    # Check 7: Custom business validation rules
+    if custom_rules is not None:
+        checks_performed.append("custom_rules")
+        try:
+            custom_res = validate_custom_rules(
+                df,
+                rules=custom_rules,
+                raise_on_error=raise_on_error,
+            )
+            details["custom_rules"] = custom_res
+            failed_custom = [r for r, ok in custom_res.items() if not ok]
+            if failed_custom:
+                err_msg = f"Custom validation rule(s) failed: {failed_custom}"
+                errors.append(err_msg)
+                if raise_on_error:
+                    raise ValueError(err_msg)
+        except (TypeError, ValueError, KeyError) as err:
+            details["custom_rules"] = {"error": str(err)}
             errors.append(str(err))
             if raise_on_error:
                 raise

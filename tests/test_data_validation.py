@@ -15,7 +15,11 @@ import pytest
 from data_processor import (
     DataProcessor,
     DataValidator,
+    get_allowed_values_violations,
+    get_null_violations,
+    get_unique_violations,
     validate_allowed_values,
+    validate_custom_rules,
     validate_null_constraints,
     validate_unique_constraints,
 )
@@ -325,3 +329,157 @@ class TestValidationOOPIntegration:
             allowed_values={"status": ["active", "pending", "inactive"]}
         )
         assert allowed_res["status"] is True
+
+
+# ============================================================================
+# Section 6: Code Review Feedback Refinement Tests (Week 05 Milestone)
+# ============================================================================
+
+class TestRefinedValidationDiagnostics:
+    """Tests verifying actionable diagnostic violation payloads requested in review."""
+
+    def test_null_violations_detailed_metrics(self, sample_dirty_df: pd.DataFrame) -> None:
+        metrics = get_null_violations(sample_dirty_df, columns=["username", "score"], max_missing_ratio=0.2)
+        assert metrics["username"]["missing_count"] == 1
+        assert metrics["username"]["missing_ratio"] == 0.2
+        assert metrics["username"]["passed"] is True
+        assert metrics["score"]["missing_count"] == 2
+        assert metrics["score"]["missing_ratio"] == 0.4
+        assert metrics["score"]["passed"] is False
+
+    def test_unique_violations_sample_payload(self, sample_dirty_df: pd.DataFrame) -> None:
+        diag = get_unique_violations(sample_dirty_df, columns="user_id", allow_na=True)
+        assert diag["is_unique"] is False
+        assert diag["duplicate_count"] == 1
+        assert 102 in diag["sample_duplicates"]
+
+    def test_composite_unique_violations(self) -> None:
+        df = pd.DataFrame({
+            "dept": ["eng", "eng", "hr", "hr"],
+            "role": ["dev", "dev", "mgr", "dir"],
+        })
+        diag = get_unique_violations(df, columns=["dept", "role"])
+        assert diag["is_unique"] is False
+        assert diag["duplicate_count"] == 1
+        assert ("eng", "dev") in diag["sample_duplicates"]
+
+    def test_pipeline_validation_contains_rich_diagnostics(self, sample_dirty_df: pd.DataFrame) -> None:
+        report = validate_pipeline_data(
+            sample_dirty_df,
+            non_null_columns=["username", "score"],
+            unique_columns="user_id",
+            allowed_values={"status": ["active", "pending", "inactive"]},
+            raise_on_error=False,
+        )
+        assert report["is_valid"] is False
+        assert "null_diagnostics" in report["details"]
+        assert "duplicate_count" in report["details"]["unique_constraints"]
+        assert "allowed_values_violations" in report["details"]
+        assert "unknown" in report["details"]["allowed_values_violations"]["status"]
+
+
+class TestCustomValidationRules:
+    """Tests verifying custom rule predicate validation support."""
+
+    def test_custom_rule_success(self, sample_valid_df: pd.DataFrame) -> None:
+        rules = {
+            "age_above_18": lambda df: df["age"] > 18,
+            "score_within_range": lambda df: bool((df["score"] >= 0).all() and (df["score"] <= 100).all()),
+        }
+        res = validate_custom_rules(sample_valid_df, rules=rules, raise_on_error=True)
+        assert res["age_above_18"] is True
+        assert res["score_within_range"] is True
+
+    def test_custom_rule_failure_raises(self, sample_dirty_df: pd.DataFrame) -> None:
+        rules = {
+            "all_ages_positive": lambda df: (df["age"] > 0).all(),
+        }
+        with pytest.raises(ValueError) as excinfo:
+            validate_custom_rules(sample_dirty_df, rules=rules, raise_on_error=True)
+        assert "Custom validation rule(s) failed" in str(excinfo.value)
+
+    def test_custom_rule_integrated_in_pipeline_data(self, sample_valid_df: pd.DataFrame) -> None:
+        report = validate_pipeline_data(
+            sample_valid_df,
+            custom_rules={"username_starts_with_letter": lambda df: df["username"].str.match(r"^[a-z]").all()},
+            raise_on_error=True,
+        )
+        assert report["is_valid"] is True
+        assert "custom_rules" in report["checks_performed"]
+        assert report["details"]["custom_rules"]["username_starts_with_letter"] is True
+
+
+class TestAllowedValuesRefinements:
+    """Tests verifying case-insensitivity and whitespace stripping options."""
+
+    def test_ignore_case_matching(self) -> None:
+        df = pd.DataFrame({"status": ["ACTIVE", "Pending", "inactive"]})
+        # Without ignore_case -> fails
+        res_strict = validate_allowed_values(df, allowed_values={"status": ["active", "pending", "inactive"]})
+        assert res_strict["status"] is False
+
+        # With ignore_case -> passes
+        res_loose = validate_allowed_values(
+            df,
+            allowed_values={"status": ["active", "pending", "inactive"]},
+            ignore_case=True,
+        )
+        assert res_loose["status"] is True
+
+    def test_strip_whitespace_matching(self) -> None:
+        df = pd.DataFrame({"role": [" admin ", "user", "editor  "]})
+        res_stripped = validate_allowed_values(
+            df,
+            allowed_values={"role": ["admin", "user", "editor"]},
+            strip_whitespace=True,
+        )
+        assert res_stripped["role"] is True
+
+    def test_get_allowed_values_violations_helper(self, sample_dirty_df: pd.DataFrame) -> None:
+        violations = get_allowed_values_violations(
+            sample_dirty_df,
+            allowed_values={"status": ["active", "inactive"]},
+        )
+        assert "unknown" in violations["status"]
+        assert "deleted" in violations["status"]
+
+
+class TestDataValidatorErrorModes:
+    """Tests verifying DataValidator error handling strategies (raise, quarantine, warn)."""
+
+    def test_quarantine_mode_filters_dirty_rows(self, sample_dirty_df: pd.DataFrame) -> None:
+        validator = DataValidator(
+            non_null_columns=["username"],
+            unique_columns="user_id",
+            allowed_values={"status": ["active", "pending", "inactive"]},
+            error_mode="quarantine",
+        )
+        clean_df = validator.process(sample_dirty_df)
+        assert len(clean_df) < len(sample_dirty_df)
+        assert validator.quarantined_data is not None
+        assert len(validator.quarantined_data) > 0
+        # Clean DF satisfies constraints
+        assert clean_df["username"].isna().sum() == 0
+        assert not clean_df.duplicated(subset=["user_id"]).any()
+
+    def test_warn_mode_passthrough(self, sample_dirty_df: pd.DataFrame) -> None:
+        validator = DataValidator(
+            non_null_columns=["username"],
+            error_mode="warn",
+        )
+        df_out = validator.process(sample_dirty_df)
+        assert len(df_out) == len(sample_dirty_df)
+        assert any(entry["action"] == "warning_null_constraints" for entry in validator.audit_log)
+
+    def test_pipeline_quarantined_data_aggregation(self, sample_dirty_df: pd.DataFrame) -> None:
+        pipeline = (
+            DataPipeline()
+            .add_validator(
+                non_null_columns=["username"],
+                error_mode="quarantine",
+            )
+        )
+        clean = pipeline.execute(sample_dirty_df)
+        assert len(clean) == 4  # 1 null username quarantined
+        assert pipeline.quarantined_data is not None
+        assert len(pipeline.quarantined_data) == 1

@@ -4,7 +4,7 @@ A modular, production-ready Python data pipeline repository built with clear typ
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Type Checked](https://img.shields.io/badge/type--checked-mypy--strict-green.svg)](http://mypy-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-208%20passed-brightgreen.svg)](https://docs.pytest.org/)
+[![Tests](https://img.shields.io/badge/tests-269%20passed-brightgreen.svg)](https://docs.pytest.org/)
 
 ---
 
@@ -12,15 +12,15 @@ A modular, production-ready Python data pipeline repository built with clear typ
 
 ```
 ├── data_loader.py                 # Week 01 & 03: CSV & JSON DataLoaders (BaseDataLoader, DataLoader, JSONDataLoader)
-├── data_processor.py              # Week 02, 03 & 04: OOP & Functional Processors & Validators
-├── pipeline.py                    # Week 03 & 04: OOP Pipeline Orchestrator & Multi-Constraint Validation
+├── data_processor.py              # Week 02, 03, 04 & 05: Processors, Validators & Custom Rules Engine
+├── pipeline.py                    # Week 03, 04 & 05: OOP Pipeline Orchestrator, Diagnostics & Quarantine
 ├── pytest.ini                     # Global pytest test runner configuration
 ├── README.md                      # Repository overview & architectural documentation
 ├── tests/
 │   ├── __init__.py
 │   ├── test_data_loader.py        # Automated test suite for data_loader (12 tests)
 │   ├── test_data_processor.py     # Automated test suite for data_processor (30 tests)
-│   ├── test_data_validation.py    # Automated test suite for data validation & constraints (35 tests)
+│   ├── test_data_validation.py    # Automated test suite for validation & review refinements (48 tests)
 │   └── test_oop_pipeline.py       # Automated test suite for OOP classes & pipeline (27 tests)
 └── practice/
     ├── week-01-build-type-hinted-data-pipeline-module/
@@ -37,12 +37,20 @@ A modular, production-ready Python data pipeline repository built with clear typ
     │   ├── pipeline.py            # Week 03 OOP pipeline orchestrator copy
     │   ├── test_oop_pipeline.py   # Week 03 test suite copy (27 tests)
     │   └── README.md              # Week 03 architectural & OOP documentation
-    └── week-04-practice-version-control/
-        ├── data_loader.py         # Week 04 module copy
-        ├── data_processor.py      # Week 04 module copy with validation functions
-        ├── pipeline.py            # Week 04 pipeline module copy with validation
-        ├── test_data_validation.py# Week 04 test suite copy (35 tests)
-        └── README.md              # Week 04 Git workflow, PR guide & validation docs
+    ├── week-04-practice-version-control/
+    │   ├── data_loader.py         # Week 04 module copy
+    │   ├── data_processor.py      # Week 04 module copy with validation functions
+    │   ├── pipeline.py            # Week 04 pipeline module copy with validation
+    │   ├── test_data_validation.py# Week 04 test suite copy (35 tests)
+    │   └── README.md              # Week 04 Git workflow, PR guide & validation docs
+    └── week-05-practice-refine-and-merge-pull-request/
+        ├── data_loader.py         # Week 05 module copy
+        ├── data_processor.py      # Week 05 module copy with review refinements & quarantine mode
+        ├── pipeline.py            # Week 05 pipeline module copy with rich diagnostics
+        ├── test_data_validation.py# Week 05 test suite copy (48 tests)
+        ├── merge_pr.ps1           # Automation script to checkout, commit iteration & merge PR
+        ├── merge_pr.bat           # Batch script for Windows shell execution
+        └── README.md              # Week 05 Code review resolution matrix & PR merge guide
 ```
 
 ---
@@ -161,8 +169,8 @@ Success: no issues found in 3 source files
 python -m pytest -v
 ```
 
-All 208 automated unit tests pass across `tests/` and `practice/` suites:
+All 269 automated unit tests pass across `tests/` and `practice/` suites:
 - 24 tests for `data_loader` (12 root + 12 practice copy)
 - 60 tests for `data_processor` (30 root + 30 practice copy)
-- 70 tests for `data_validation` (35 root + 35 practice copy)
+- 131 tests for `data_validation` (48 root + 35 week-04 + 48 week-05)
 - 54 tests for `oop_pipeline` (27 root + 27 practice copy)
