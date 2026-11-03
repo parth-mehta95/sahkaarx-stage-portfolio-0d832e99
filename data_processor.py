@@ -22,6 +22,9 @@ __all__ = [
     # Functional APIs
     "validate_schema",
     "validate_column_ranges",
+    "validate_null_constraints",
+    "validate_unique_constraints",
+    "validate_allowed_values",
     "filter_by_condition",
     "normalize_numeric_columns",
     "cast_column_types",
@@ -176,6 +179,229 @@ def validate_column_ranges(
             is_valid = is_valid and bool((series <= max_val).all())
 
         results[col] = is_valid
+
+    return results
+
+
+def validate_null_constraints(
+    df: pd.DataFrame,
+    columns: Optional[Sequence[str]] = None,
+    max_missing_ratio: float = 0.0,
+    raise_on_error: bool = False,
+) -> Dict[str, bool]:
+    """
+    Validate that missing/null values in specified columns do not exceed allowed thresholds.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The pandas DataFrame to inspect.
+    columns : Optional[Sequence[str]], default None
+        Sequence of column names to validate. If None, all columns in df are checked.
+    max_missing_ratio : float, default 0.0
+        Maximum allowable proportion of missing (null/NaN) values, between 0.0 and 1.0.
+        0.0 means strictly zero missing values are allowed (complete data required).
+    raise_on_error : bool, default False
+        Whether to raise a ValueError if any column exceeds the allowed missing ratio.
+
+    Returns
+    -------
+    Dict[str, bool]
+        Dictionary mapping each validated column to a boolean indicating whether it
+        satisfied the missing ratio constraint.
+
+    Raises
+    ------
+    TypeError
+        If df is not a pandas DataFrame, or if max_missing_ratio is not numeric.
+    ValueError
+        If max_missing_ratio is outside [0.0, 1.0], or if raise_on_error is True and a
+        column exceeds the allowable missing ratio.
+    KeyError
+        If any specified column is missing from df.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"Expected input of type pd.DataFrame, got {type(df).__name__}")
+
+    if not isinstance(max_missing_ratio, (int, float)) or isinstance(max_missing_ratio, bool):
+        raise TypeError(f"Expected numeric max_missing_ratio, got {type(max_missing_ratio).__name__}")
+
+    if not (0.0 <= max_missing_ratio <= 1.0):
+        raise ValueError(
+            f"max_missing_ratio must be between 0.0 and 1.0 inclusive, got {max_missing_ratio}."
+        )
+
+    cols = list(columns) if columns is not None else list(df.columns)
+    for col in cols:
+        if col not in df.columns:
+            raise KeyError(f"Column '{col}' specified in columns not found in DataFrame.")
+
+    results: Dict[str, bool] = {}
+    total_rows = len(df)
+
+    for col in cols:
+        if total_rows == 0:
+            results[col] = True
+            continue
+
+        missing_count = int(df[col].isna().sum())
+        missing_ratio = float(missing_count / total_rows)
+        results[col] = bool(missing_ratio <= max_missing_ratio)
+
+    if raise_on_error:
+        failed_cols = [c for c, passed in results.items() if not passed]
+        if failed_cols:
+            raise ValueError(
+                f"Null constraint validation failed for columns: {failed_cols} "
+                f"(max allowed missing ratio: {max_missing_ratio})"
+            )
+
+    return results
+
+
+def validate_unique_constraints(
+    df: pd.DataFrame,
+    columns: Union[str, Sequence[str]],
+    allow_na: bool = False,
+    raise_on_error: bool = False,
+) -> bool:
+    """
+    Validate that a column or composite combination of columns contains strictly unique values.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The pandas DataFrame to inspect.
+    columns : Union[str, Sequence[str]]
+        A single column name or sequence of column names forming the uniqueness key.
+    allow_na : bool, default False
+        Whether null/NaN values are ignored during uniqueness checks.
+        If False, presence of any nulls violates uniqueness.
+    raise_on_error : bool, default False
+        Whether to raise a ValueError if duplicate rows exist.
+
+    Returns
+    -------
+    bool
+        True if all rows are unique across the specified column(s), False otherwise.
+
+    Raises
+    ------
+    TypeError
+        If df is not a pandas DataFrame, or columns argument is not a str or Sequence[str].
+    KeyError
+        If any specified column is missing from df.
+    ValueError
+        If columns is empty, or if raise_on_error is True and duplicate rows exist.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"Expected input of type pd.DataFrame, got {type(df).__name__}")
+
+    if isinstance(columns, str):
+        cols = [columns]
+    elif isinstance(columns, (list, tuple, Sequence)):
+        cols = list(columns)
+    else:
+        raise TypeError(f"Expected columns to be str or Sequence[str], got {type(columns).__name__}")
+
+    if not cols:
+        raise ValueError("columns cannot be empty.")
+
+    for col in cols:
+        if col not in df.columns:
+            raise KeyError(f"Column '{col}' specified in columns not found in DataFrame.")
+
+    if df.empty:
+        return True
+
+    subset = df[cols]
+    if not allow_na and bool(subset.isna().any().any()):
+        if raise_on_error:
+            raise ValueError(
+                f"Uniqueness constraint failed: column(s) {cols} contain null values and allow_na=False."
+            )
+        return False
+
+    if allow_na:
+        subset = subset.dropna()
+
+    is_unique = not bool(subset.duplicated().any())
+    if raise_on_error and not is_unique:
+        duplicates_count = int(subset.duplicated().sum())
+        raise ValueError(
+            f"Uniqueness constraint validation failed for column(s) {cols}: "
+            f"found {duplicates_count} duplicate row(s)."
+        )
+
+    return is_unique
+
+
+def validate_allowed_values(
+    df: pd.DataFrame,
+    allowed_values: Mapping[str, Sequence[Any]],
+    allow_null: bool = True,
+    raise_on_error: bool = False,
+) -> Dict[str, bool]:
+    """
+    Validate that values in specified columns belong to an allowed set of discrete values.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The pandas DataFrame to inspect.
+    allowed_values : Mapping[str, Sequence[Any]]
+        Mapping of column names to valid/allowable values.
+    allow_null : bool, default True
+        Whether null/NaN values are considered permissible.
+    raise_on_error : bool, default False
+        Whether to raise a ValueError if invalid values are encountered.
+
+    Returns
+    -------
+    Dict[str, bool]
+        Dictionary mapping column names to a boolean indicating validity.
+
+    Raises
+    ------
+    TypeError
+        If df is not a pandas DataFrame, or allowed_values is not a Mapping.
+    KeyError
+        If any specified column in allowed_values is missing from df.
+    ValueError
+        If allowed_values is empty, or if raise_on_error is True and invalid values exist.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"Expected input of type pd.DataFrame, got {type(df).__name__}")
+
+    if not isinstance(allowed_values, Mapping):
+        raise TypeError(f"Expected allowed_values to be a Mapping, got {type(allowed_values).__name__}")
+
+    if not allowed_values:
+        raise ValueError("allowed_values mapping cannot be empty.")
+
+    for col in allowed_values.keys():
+        if col not in df.columns:
+            raise KeyError(f"Column '{col}' specified in allowed_values not found in DataFrame.")
+
+    results: Dict[str, bool] = {}
+
+    for col, valid_set in allowed_values.items():
+        series = df[col]
+        if allow_null:
+            series = series.dropna()
+
+        if series.empty:
+            results[col] = True
+            continue
+
+        valid_collection = set(valid_set)
+        is_valid = bool(series.isin(valid_collection).all())
+        results[col] = is_valid
+
+    if raise_on_error:
+        failed = [col for col, ok in results.items() if not ok]
+        if failed:
+            raise ValueError(f"Allowed values constraint violated for columns: {failed}")
 
     return results
 
@@ -767,6 +993,10 @@ class DataValidator(BaseDataProcessor):
         required_columns: Optional[Sequence[str]] = None,
         column_types: Optional[Mapping[str, Union[type, str]]] = None,
         bounds: Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]] = None,
+        non_null_columns: Optional[Sequence[str]] = None,
+        unique_columns: Optional[Union[str, Sequence[str]]] = None,
+        allowed_values: Optional[Mapping[str, Sequence[Any]]] = None,
+        max_missing_ratio: float = 0.0,
         allow_empty: bool = False,
         name: Optional[str] = None,
     ) -> None:
@@ -779,8 +1009,16 @@ class DataValidator(BaseDataProcessor):
             Sequence of column names that must exist.
         column_types : Optional[Mapping[str, Union[type, str]]], default None
             Expected column types mapping.
-        bounds : Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]], default None
+        bounds : Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]] = None
             Numeric range bounds mapping.
+        non_null_columns : Optional[Sequence[str]], default None
+            Columns required to satisfy nullity / completeness constraints.
+        unique_columns : Optional[Union[str, Sequence[str]]], default None
+            Column or list of columns required to have unique values.
+        allowed_values : Optional[Mapping[str, Sequence[Any]]], default None
+            Categorical columns mapped to permitted discrete values.
+        max_missing_ratio : float, default 0.0
+            Allowed proportion of missing values for non-null checks.
         allow_empty : bool, default False
             Whether empty DataFrames are allowed.
         name : Optional[str], default None
@@ -790,6 +1028,10 @@ class DataValidator(BaseDataProcessor):
         self.required_columns: Optional[Sequence[str]] = required_columns
         self.column_types: Optional[Mapping[str, Union[type, str]]] = column_types
         self.bounds: Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]] = bounds
+        self.non_null_columns: Optional[Sequence[str]] = non_null_columns
+        self.unique_columns: Optional[Union[str, Sequence[str]]] = unique_columns
+        self.allowed_values: Optional[Mapping[str, Sequence[Any]]] = allowed_values
+        self.max_missing_ratio: float = max_missing_ratio
         self.allow_empty: bool = allow_empty
 
     def validate_schema(
@@ -854,6 +1096,119 @@ class DataValidator(BaseDataProcessor):
         self.log_step("validate_column_ranges", {"results": results})
         return results
 
+    def validate_null_constraints(
+        self,
+        df: pd.DataFrame,
+        columns: Optional[Sequence[str]] = None,
+        max_missing_ratio: Optional[float] = None,
+        raise_on_error: bool = False,
+    ) -> Dict[str, bool]:
+        """
+        Validate null constraints on a DataFrame.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Target DataFrame.
+        columns : Optional[Sequence[str]], default None
+            Columns to validate, defaults to preset self.non_null_columns.
+        max_missing_ratio : Optional[float], default None
+            Allowable missing ratio, defaults to preset self.max_missing_ratio.
+        raise_on_error : bool, default False
+            Whether to raise on violation.
+
+        Returns
+        -------
+        Dict[str, bool]
+            Per-column validity mapping.
+        """
+        target_cols = columns if columns is not None else self.non_null_columns
+        ratio = max_missing_ratio if max_missing_ratio is not None else self.max_missing_ratio
+        results = validate_null_constraints(
+            df,
+            columns=target_cols,
+            max_missing_ratio=ratio,
+            raise_on_error=raise_on_error,
+        )
+        self.log_step("validate_null_constraints", {"results": results})
+        return results
+
+    def validate_unique_constraints(
+        self,
+        df: pd.DataFrame,
+        columns: Optional[Union[str, Sequence[str]]] = None,
+        allow_na: bool = False,
+        raise_on_error: bool = False,
+    ) -> bool:
+        """
+        Validate uniqueness constraints on a DataFrame.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Target DataFrame.
+        columns : Optional[Union[str, Sequence[str]]], default None
+            Target column(s), defaults to preset self.unique_columns.
+        allow_na : bool, default False
+            Whether to allow null values.
+        raise_on_error : bool, default False
+            Whether to raise on violation.
+
+        Returns
+        -------
+        bool
+            True if all rows are unique across columns.
+        """
+        target_cols = columns if columns is not None else self.unique_columns
+        if target_cols is None:
+            raise ValueError("No uniqueness columns provided or configured on DataValidator.")
+        result = validate_unique_constraints(
+            df,
+            columns=target_cols,
+            allow_na=allow_na,
+            raise_on_error=raise_on_error,
+        )
+        self.log_step("validate_unique_constraints", {"columns": list(target_cols) if isinstance(target_cols, (list, tuple, Sequence)) and not isinstance(target_cols, str) else [target_cols], "passed": result})
+        return result
+
+    def validate_allowed_values(
+        self,
+        df: pd.DataFrame,
+        allowed_values: Optional[Mapping[str, Sequence[Any]]] = None,
+        allow_null: bool = True,
+        raise_on_error: bool = False,
+    ) -> Dict[str, bool]:
+        """
+        Validate discrete allowed values on categorical columns.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Target DataFrame.
+        allowed_values : Optional[Mapping[str, Sequence[Any]]], default None
+            Mapping of column names to valid values, defaults to self.allowed_values.
+        allow_null : bool, default True
+            Whether null values are permissible.
+        raise_on_error : bool, default False
+            Whether to raise on violation.
+
+        Returns
+        -------
+        Dict[str, bool]
+            Per-column validity mapping.
+        """
+        target_allowed = allowed_values if allowed_values is not None else self.allowed_values
+        if target_allowed is None:
+            raise ValueError("No allowed values mapping provided or configured on DataValidator.")
+        results = validate_allowed_values(
+            df,
+            allowed_values=target_allowed,
+            allow_null=allow_null,
+            raise_on_error=raise_on_error,
+        )
+        self.log_step("validate_allowed_values", {"results": results})
+        return results
+
     def process(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Execute configured validation constraints.
@@ -871,7 +1226,8 @@ class DataValidator(BaseDataProcessor):
         Raises
         ------
         ValueError
-            If required columns are missing, DataFrame is empty, or ranges fail.
+            If required columns are missing, DataFrame is empty, ranges fail,
+            null constraints fail, or uniqueness constraints fail.
         TypeError
             If input is not a DataFrame or column types mismatch.
         """
@@ -891,6 +1247,28 @@ class DataValidator(BaseDataProcessor):
             failed = [col for col, passed in range_results.items() if not passed]
             if failed:
                 raise ValueError(f"Numeric range validation failed for columns: {failed}")
+
+        if self.non_null_columns is not None:
+            self.validate_null_constraints(
+                df,
+                columns=self.non_null_columns,
+                max_missing_ratio=self.max_missing_ratio,
+                raise_on_error=True,
+            )
+
+        if self.unique_columns is not None:
+            self.validate_unique_constraints(
+                df,
+                columns=self.unique_columns,
+                raise_on_error=True,
+            )
+
+        if self.allowed_values is not None:
+            self.validate_allowed_values(
+                df,
+                allowed_values=self.allowed_values,
+                raise_on_error=True,
+            )
 
         self.log_step("process_validation", {"rows_validated": len(df)})
         return df.copy()
@@ -1274,6 +1652,60 @@ class DataProcessor(BaseDataProcessor):
         target_df = df if df is not None else self.get_data()
         result = self.validator.validate_column_ranges(target_df, bounds=bounds)
         self.log_step("validate_column_ranges", {"results": result})
+        return result
+
+    def validate_null_constraints(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        columns: Optional[Sequence[str]] = None,
+        max_missing_ratio: float = 0.0,
+        raise_on_error: bool = False,
+    ) -> Dict[str, bool]:
+        """Validate null constraints on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        result = self.validator.validate_null_constraints(
+            target_df,
+            columns=columns,
+            max_missing_ratio=max_missing_ratio,
+            raise_on_error=raise_on_error,
+        )
+        self.log_step("validate_null_constraints", {"results": result})
+        return result
+
+    def validate_unique_constraints(
+        self,
+        columns: Union[str, Sequence[str]],
+        df: Optional[pd.DataFrame] = None,
+        allow_na: bool = False,
+        raise_on_error: bool = False,
+    ) -> bool:
+        """Validate uniqueness constraints on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        result = self.validator.validate_unique_constraints(
+            target_df,
+            columns=columns,
+            allow_na=allow_na,
+            raise_on_error=raise_on_error,
+        )
+        self.log_step("validate_unique_constraints", {"passed": result})
+        return result
+
+    def validate_allowed_values(
+        self,
+        allowed_values: Mapping[str, Sequence[Any]],
+        df: Optional[pd.DataFrame] = None,
+        allow_null: bool = True,
+        raise_on_error: bool = False,
+    ) -> Dict[str, bool]:
+        """Validate categorical allowed values on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        result = self.validator.validate_allowed_values(
+            target_df,
+            allowed_values=allowed_values,
+            allow_null=allow_null,
+            raise_on_error=raise_on_error,
+        )
+        self.log_step("validate_allowed_values", {"results": result})
         return result
 
     # Transformation Method Group
