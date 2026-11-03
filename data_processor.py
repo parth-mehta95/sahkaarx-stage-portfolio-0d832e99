@@ -8,8 +8,28 @@ with strict type contracts and comprehensive docstrings.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 import pandas as pd  # type: ignore[import-untyped]
+
+__all__ = [
+    # OOP Classes
+    "BaseDataProcessor",
+    "DataValidator",
+    "DataTransformer",
+    "DataAggregator",
+    "DataProcessor",
+    # Functional APIs
+    "validate_schema",
+    "validate_column_ranges",
+    "filter_by_condition",
+    "normalize_numeric_columns",
+    "cast_column_types",
+    "aggregate_by_group",
+    "calculate_summary_statistics",
+    "pivot_and_aggregate",
+    "run_pipeline",
+]
 
 
 # ============================================================================
@@ -647,6 +667,736 @@ def run_pipeline(
         )
 
     return processed_df
+
+
+# ============================================================================
+# Section 5: Object-Oriented Data Processor Classes (OOP Hierarchy)
+# ============================================================================
+
+class BaseDataProcessor(ABC):
+    """
+    Abstract Base Class establishing the contract for data processing pipeline stages.
+
+    Subclasses must implement the abstract `process` method, ensuring consistent
+    execution signatures across validation, transformation, and aggregation stages.
+    """
+
+    def __init__(self, name: Optional[str] = None) -> None:
+        """
+        Initialize the processor instance with an optional identifier and audit log.
+
+        Parameters
+        ----------
+        name : Optional[str], default None
+            Identifier name for this processor. Defaults to the class name.
+        """
+        self.name: str = name if name is not None else self.__class__.__name__
+        self._audit_log: List[Dict[str, Any]] = []
+
+    @property
+    def audit_log(self) -> List[Dict[str, Any]]:
+        """Return a defensive copy of the processor's execution audit log."""
+        return list(self._audit_log)
+
+    def log_step(self, action: str, details: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Record a pipeline action entry into the audit log.
+
+        Parameters
+        ----------
+        action : str
+            Name or label of the executed step.
+        details : Optional[Dict[str, Any]], default None
+            Metadata or parameters associated with this step.
+        """
+        entry: Dict[str, Any] = {
+            "processor": self.name,
+            "action": action,
+            "details": details or {},
+        }
+        self._audit_log.append(entry)
+
+    def reset_audit_log(self) -> None:
+        """Clear all entries from the audit log."""
+        self._audit_log.clear()
+
+    @abstractmethod
+    def process(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Abstract method to process an input DataFrame.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The input DataFrame to process.
+
+        Returns
+        -------
+        pd.DataFrame
+            The processed DataFrame.
+        """
+        pass
+
+    def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Enable processor instances to be called directly as callables.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The input DataFrame.
+
+        Returns
+        -------
+        pd.DataFrame
+            The processed DataFrame.
+        """
+        return self.process(df)
+
+
+class DataValidator(BaseDataProcessor):
+    """
+    Object-Oriented Data Validator inheriting from BaseDataProcessor.
+
+    Specializes in schema validation, required column verification, column data type
+    conformance, and numerical range boundary checks.
+    """
+
+    def __init__(
+        self,
+        required_columns: Optional[Sequence[str]] = None,
+        column_types: Optional[Mapping[str, Union[type, str]]] = None,
+        bounds: Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]] = None,
+        allow_empty: bool = False,
+        name: Optional[str] = None,
+    ) -> None:
+        """
+        Initialize DataValidator with optional preset validation constraints.
+
+        Parameters
+        ----------
+        required_columns : Optional[Sequence[str]], default None
+            Sequence of column names that must exist.
+        column_types : Optional[Mapping[str, Union[type, str]]], default None
+            Expected column types mapping.
+        bounds : Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]], default None
+            Numeric range bounds mapping.
+        allow_empty : bool, default False
+            Whether empty DataFrames are allowed.
+        name : Optional[str], default None
+            Custom identifier name.
+        """
+        super().__init__(name=name)
+        self.required_columns: Optional[Sequence[str]] = required_columns
+        self.column_types: Optional[Mapping[str, Union[type, str]]] = column_types
+        self.bounds: Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]] = bounds
+        self.allow_empty: bool = allow_empty
+
+    def validate_schema(
+        self,
+        df: pd.DataFrame,
+        required_columns: Optional[Sequence[str]] = None,
+        column_types: Optional[Mapping[str, Union[type, str]]] = None,
+        allow_empty: Optional[bool] = None,
+    ) -> bool:
+        """
+        Validate schema constraints on a DataFrame.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Target DataFrame.
+        required_columns : Optional[Sequence[str]], default None
+            Required columns, defaults to preset self.required_columns.
+        column_types : Optional[Mapping[str, Union[type, str]]], default None
+            Column types, defaults to preset self.column_types.
+        allow_empty : Optional[bool], default None
+            Empty flag, defaults to self.allow_empty.
+
+        Returns
+        -------
+        bool
+            True if valid; raises TypeError/ValueError otherwise.
+        """
+        cols = required_columns if required_columns is not None else (self.required_columns or [])
+        types = column_types if column_types is not None else self.column_types
+        empty_ok = allow_empty if allow_empty is not None else self.allow_empty
+
+        result = validate_schema(df, required_columns=cols, column_types=types, allow_empty=empty_ok)
+        self.log_step("validate_schema", {"required_columns": list(cols), "passed": result})
+        return result
+
+    def validate_column_ranges(
+        self,
+        df: pd.DataFrame,
+        bounds: Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]] = None,
+    ) -> Dict[str, bool]:
+        """
+        Validate numerical boundary ranges on a DataFrame.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Target DataFrame.
+        bounds : Optional[Mapping[str, Tuple[Optional[float], Optional[float]]]], default None
+            Column boundary specs, defaults to preset self.bounds.
+
+        Returns
+        -------
+        Dict[str, bool]
+            Per-column validity dictionary.
+        """
+        target_bounds = bounds if bounds is not None else self.bounds
+        if target_bounds is None:
+            raise ValueError("No numeric bounds provided or configured on DataValidator.")
+
+        results = validate_column_ranges(df, bounds=target_bounds)
+        self.log_step("validate_column_ranges", {"results": results})
+        return results
+
+    def process(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Execute configured validation constraints.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The DataFrame to validate.
+
+        Returns
+        -------
+        pd.DataFrame
+            A defensive copy of the DataFrame if validation succeeds.
+
+        Raises
+        ------
+        ValueError
+            If required columns are missing, DataFrame is empty, or ranges fail.
+        TypeError
+            If input is not a DataFrame or column types mismatch.
+        """
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(f"Expected pd.DataFrame, got {type(df).__name__}")
+
+        if self.required_columns is not None:
+            self.validate_schema(
+                df,
+                required_columns=self.required_columns,
+                column_types=self.column_types,
+                allow_empty=self.allow_empty,
+            )
+
+        if self.bounds is not None:
+            range_results = self.validate_column_ranges(df, bounds=self.bounds)
+            failed = [col for col, passed in range_results.items() if not passed]
+            if failed:
+                raise ValueError(f"Numeric range validation failed for columns: {failed}")
+
+        self.log_step("process_validation", {"rows_validated": len(df)})
+        return df.copy()
+
+
+class DataTransformer(BaseDataProcessor):
+    """
+    Object-Oriented Data Transformer inheriting from BaseDataProcessor.
+
+    Specializes in conditional row filtering, numerical scaling, and column type coercion.
+    """
+
+    def __init__(
+        self,
+        filters: Optional[Sequence[Tuple[str, str, Any]]] = None,
+        normalize_cols: Optional[Sequence[str]] = None,
+        norm_method: str = "minmax",
+        cast_types: Optional[Mapping[str, str]] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        """
+        Initialize DataTransformer with optional transformation configurations.
+
+        Parameters
+        ----------
+        filters : Optional[Sequence[Tuple[str, str, Any]]], default None
+            Sequence of (column, operator, value) filter tuples to apply sequentially.
+        normalize_cols : Optional[Sequence[str]], default None
+            Columns to normalize.
+        norm_method : str, default "minmax"
+            Normalization algorithm ('minmax' or 'zscore').
+        cast_types : Optional[Mapping[str, str]], default None
+            Mapping of column names to target pandas dtype strings.
+        name : Optional[str], default None
+            Custom identifier name.
+        """
+        super().__init__(name=name)
+        self.filters: List[Tuple[str, str, Any]] = list(filters) if filters else []
+        self.normalize_cols: Optional[Sequence[str]] = normalize_cols
+        self.norm_method: str = norm_method
+        self.cast_types: Optional[Mapping[str, str]] = cast_types
+
+    def add_filter(self, column: str, operator: str, value: Any) -> DataTransformer:
+        """
+        Add a filter condition tuple to the transformer pipeline.
+
+        Parameters
+        ----------
+        column : str
+            Target column.
+        operator : str
+            Comparison operator.
+        value : Any
+            Filter target value.
+
+        Returns
+        -------
+        DataTransformer
+            self for method chaining.
+        """
+        self.filters.append((column, operator, value))
+        return self
+
+    def filter_by_condition(
+        self,
+        df: pd.DataFrame,
+        column: str,
+        operator: str,
+        value: Any,
+    ) -> pd.DataFrame:
+        """Apply conditional row filtering to a DataFrame."""
+        result = filter_by_condition(df, column=column, operator=operator, value=value)
+        self.log_step("filter_by_condition", {"column": column, "operator": operator, "rows_out": len(result)})
+        return result
+
+    def normalize_numeric_columns(
+        self,
+        df: pd.DataFrame,
+        columns: Optional[Sequence[str]] = None,
+        method: str = "minmax",
+    ) -> pd.DataFrame:
+        """Apply numeric column normalization to a DataFrame."""
+        result = normalize_numeric_columns(df, columns=columns, method=method)
+        self.log_step("normalize_numeric_columns", {"columns": list(columns) if columns else None, "method": method})
+        return result
+
+    def cast_column_types(
+        self,
+        df: pd.DataFrame,
+        type_map: Mapping[str, str],
+    ) -> pd.DataFrame:
+        """Apply type casting to DataFrame columns."""
+        result = cast_column_types(df, type_map=type_map)
+        self.log_step("cast_column_types", {"type_map": dict(type_map)})
+        return result
+
+    def process(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Execute configured transformation steps in order:
+        1. Sequential filtering conditions
+        2. Numeric column normalization
+        3. Column type casting
+        """
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(f"Expected pd.DataFrame, got {type(df).__name__}")
+
+        transformed = df.copy()
+
+        for col, op, val in self.filters:
+            transformed = self.filter_by_condition(transformed, column=col, operator=op, value=val)
+
+        if self.normalize_cols is not None:
+            transformed = self.normalize_numeric_columns(
+                transformed,
+                columns=self.normalize_cols,
+                method=self.norm_method,
+            )
+
+        if self.cast_types is not None:
+            transformed = self.cast_column_types(transformed, type_map=self.cast_types)
+
+        self.log_step("process_transformation", {"rows_out": len(transformed)})
+        return transformed
+
+
+class DataAggregator(BaseDataProcessor):
+    """
+    Object-Oriented Data Aggregator inheriting from BaseDataProcessor.
+
+    Specializes in grouping, multi-metric aggregations, descriptive statistics,
+    and two-dimensional pivot table generation.
+    """
+
+    def __init__(
+        self,
+        group_by: Optional[Union[str, Sequence[str]]] = None,
+        aggregations: Optional[Mapping[str, Union[str, Sequence[str]]]] = None,
+        reset_index: bool = True,
+        name: Optional[str] = None,
+    ) -> None:
+        """
+        Initialize DataAggregator with optional grouping and aggregation settings.
+
+        Parameters
+        ----------
+        group_by : Optional[Union[str, Sequence[str]]], default None
+            Grouping column(s).
+        aggregations : Optional[Mapping[str, Union[str, Sequence[str]]]], default None
+            Column-to-function aggregation mapping.
+        reset_index : bool, default True
+            Whether to reset index and flatten column headers.
+        name : Optional[str], default None
+            Custom identifier name.
+        """
+        super().__init__(name=name)
+        self.group_by: Optional[Union[str, Sequence[str]]] = group_by
+        self.aggregations: Optional[Mapping[str, Union[str, Sequence[str]]]] = aggregations
+        self.reset_index: bool = reset_index
+
+    def aggregate_by_group(
+        self,
+        df: pd.DataFrame,
+        group_by: Optional[Union[str, Sequence[str]]] = None,
+        aggregations: Optional[Mapping[str, Union[str, Sequence[str]]]] = None,
+        reset_index: Optional[bool] = None,
+    ) -> pd.DataFrame:
+        """Aggregate DataFrame across groups."""
+        grp = group_by if group_by is not None else self.group_by
+        aggs = aggregations if aggregations is not None else self.aggregations
+        rst = reset_index if reset_index is not None else self.reset_index
+
+        if grp is None or aggs is None:
+            raise ValueError("Both 'group_by' and 'aggregations' must be provided or configured.")
+
+        result = aggregate_by_group(df, group_by=grp, aggregations=aggs, reset_index=rst)
+        self.log_step(
+            "aggregate_by_group",
+            {"group_by": grp if isinstance(grp, str) else list(grp), "rows_out": len(result)},
+        )
+        return result
+
+    def calculate_summary_statistics(
+        self,
+        df: pd.DataFrame,
+        columns: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """Compute statistical summary dictionary for numeric columns."""
+        result = calculate_summary_statistics(df, columns=columns)
+        self.log_step("calculate_summary_statistics", {"columns": list(columns) if columns else None})
+        return result
+
+    def pivot_and_aggregate(
+        self,
+        df: pd.DataFrame,
+        index: str,
+        columns: str,
+        values: str,
+        aggfunc: str = "sum",
+        fill_value: Optional[float] = 0.0,
+    ) -> pd.DataFrame:
+        """Construct an aggregated pivot table."""
+        result = pivot_and_aggregate(
+            df,
+            index=index,
+            columns=columns,
+            values=values,
+            aggfunc=aggfunc,
+            fill_value=fill_value,
+        )
+        self.log_step("pivot_and_aggregate", {"index": index, "columns": columns, "values": values})
+        return result
+
+    def process(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Execute configured aggregation if group_by and aggregations are configured;
+        otherwise returns a defensive copy of df.
+        """
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(f"Expected pd.DataFrame, got {type(df).__name__}")
+
+        if self.group_by is not None and self.aggregations is not None:
+            return self.aggregate_by_group(
+                df,
+                group_by=self.group_by,
+                aggregations=self.aggregations,
+                reset_index=self.reset_index,
+            )
+        self.log_step("process_passthrough", {"rows": len(df)})
+        return df.copy()
+
+
+class DataProcessor(BaseDataProcessor):
+    """
+    Comprehensive Object-Oriented Data Processor inheriting from BaseDataProcessor.
+
+    Unifies validation, transformation, and aggregation operations with support
+    for stateful fluent method chaining, composition, and pipeline execution.
+    """
+
+    def __init__(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        """
+        Initialize DataProcessor with an optional starting DataFrame.
+
+        Parameters
+        ----------
+        df : Optional[pd.DataFrame], default None
+            Optional DataFrame to bind into internal state for method chaining.
+        name : Optional[str], default None
+            Custom identifier name.
+        """
+        super().__init__(name=name)
+        self._df: Optional[pd.DataFrame] = df.copy() if df is not None else None
+        self.validator: DataValidator = DataValidator(name=f"{self.name}.validator")
+        self.transformer: DataTransformer = DataTransformer(name=f"{self.name}.transformer")
+        self.aggregator: DataAggregator = DataAggregator(name=f"{self.name}.aggregator")
+
+    @property
+    def data(self) -> Optional[pd.DataFrame]:
+        """Return a copy of the currently bound DataFrame, or None if not set."""
+        return self._df.copy() if self._df is not None else None
+
+    @property
+    def has_data(self) -> bool:
+        """Return True if a DataFrame is currently loaded in internal state."""
+        return self._df is not None
+
+    def set_data(self, df: pd.DataFrame) -> DataProcessor:
+        """
+        Bind a new DataFrame into processor state (fluent method).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The DataFrame to bind.
+
+        Returns
+        -------
+        DataProcessor
+            self for method chaining.
+        """
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(f"Expected pd.DataFrame, got {type(df).__name__}")
+        self._df = df.copy()
+        self.log_step("set_data", {"shape": list(df.shape)})
+        return self
+
+    def get_data(self) -> pd.DataFrame:
+        """
+        Retrieve a defensive copy of the current internal DataFrame.
+
+        Returns
+        -------
+        pd.DataFrame
+            Copy of current DataFrame.
+
+        Raises
+        ------
+        ValueError
+            If no DataFrame is currently stored.
+        """
+        if self._df is None:
+            raise ValueError("DataProcessor contains no DataFrame. Call set_data() first.")
+        return self._df.copy()
+
+    # Fluent Transformation Chaining Methods
+    def filter(self, column: str, operator: str, value: Any) -> DataProcessor:
+        """
+        Apply filter_by_condition to internal DataFrame and update state.
+
+        Returns
+        -------
+        DataProcessor
+            self for method chaining.
+        """
+        current_df = self.get_data()
+        self._df = self.transformer.filter_by_condition(current_df, column=column, operator=operator, value=value)
+        self.log_step("filter", {"column": column, "operator": operator, "remaining_rows": len(self._df)})
+        return self
+
+    def normalize(
+        self,
+        columns: Optional[Sequence[str]] = None,
+        method: str = "minmax",
+    ) -> DataProcessor:
+        """
+        Apply normalize_numeric_columns to internal DataFrame and update state.
+
+        Returns
+        -------
+        DataProcessor
+            self for method chaining.
+        """
+        current_df = self.get_data()
+        self._df = self.transformer.normalize_numeric_columns(current_df, columns=columns, method=method)
+        self.log_step("normalize", {"columns": list(columns) if columns else None, "method": method})
+        return self
+
+    def cast(self, type_map: Mapping[str, str]) -> DataProcessor:
+        """
+        Apply cast_column_types to internal DataFrame and update state.
+
+        Returns
+        -------
+        DataProcessor
+            self for method chaining.
+        """
+        current_df = self.get_data()
+        self._df = self.transformer.cast_column_types(current_df, type_map=type_map)
+        self.log_step("cast", {"type_map": dict(type_map)})
+        return self
+
+    # Validation Method Group
+    def validate_schema(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        required_columns: Sequence[str] = (),
+        column_types: Optional[Mapping[str, Union[type, str]]] = None,
+        allow_empty: bool = False,
+    ) -> bool:
+        """Validate schema on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        result = self.validator.validate_schema(
+            target_df,
+            required_columns=required_columns,
+            column_types=column_types,
+            allow_empty=allow_empty,
+        )
+        self.log_step("validate_schema", {"passed": result})
+        return result
+
+    def validate_column_ranges(
+        self,
+        bounds: Mapping[str, Tuple[Optional[float], Optional[float]]],
+        df: Optional[pd.DataFrame] = None,
+    ) -> Dict[str, bool]:
+        """Validate numeric ranges on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        result = self.validator.validate_column_ranges(target_df, bounds=bounds)
+        self.log_step("validate_column_ranges", {"results": result})
+        return result
+
+    # Transformation Method Group
+    def filter_by_condition(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        column: str = "",
+        operator: str = "==",
+        value: Any = None,
+    ) -> pd.DataFrame:
+        """Filter rows conditionally on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        return self.transformer.filter_by_condition(target_df, column=column, operator=operator, value=value)
+
+    def normalize_numeric_columns(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        columns: Optional[Sequence[str]] = None,
+        method: str = "minmax",
+    ) -> pd.DataFrame:
+        """Normalize numeric columns on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        return self.transformer.normalize_numeric_columns(target_df, columns=columns, method=method)
+
+    def cast_column_types(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        type_map: Optional[Mapping[str, str]] = None,
+    ) -> pd.DataFrame:
+        """Cast column types on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        if type_map is None:
+            raise ValueError("type_map must be provided.")
+        return self.transformer.cast_column_types(target_df, type_map=type_map)
+
+    # Aggregation Method Group
+    def aggregate_by_group(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        group_by: Union[str, Sequence[str]] = "",
+        aggregations: Optional[Mapping[str, Union[str, Sequence[str]]]] = None,
+        reset_index: bool = True,
+    ) -> pd.DataFrame:
+        """Aggregate grouped rows on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        if aggregations is None:
+            raise ValueError("aggregations mapping must be provided.")
+        return self.aggregator.aggregate_by_group(
+            target_df,
+            group_by=group_by,
+            aggregations=aggregations,
+            reset_index=reset_index,
+        )
+
+    def calculate_summary_statistics(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        columns: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """Compute summary statistics on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        return self.aggregator.calculate_summary_statistics(target_df, columns=columns)
+
+    def pivot_and_aggregate(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        index: str = "",
+        columns: str = "",
+        values: str = "",
+        aggfunc: str = "sum",
+        fill_value: Optional[float] = 0.0,
+    ) -> pd.DataFrame:
+        """Pivot and aggregate on provided DataFrame or internal state."""
+        target_df = df if df is not None else self.get_data()
+        return self.aggregator.pivot_and_aggregate(
+            target_df,
+            index=index,
+            columns=columns,
+            values=values,
+            aggfunc=aggfunc,
+            fill_value=fill_value,
+        )
+
+    # Pipeline Orchestration Method
+    def run_pipeline(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        required_columns: Sequence[str] = (),
+        filter_column: Optional[str] = None,
+        filter_op: Optional[str] = None,
+        filter_value: Optional[Any] = None,
+        normalize_columns: Optional[Sequence[str]] = None,
+        normalize_method: str = "minmax",
+        group_by: Optional[Union[str, Sequence[str]]] = None,
+        aggregations: Optional[Mapping[str, Union[str, Sequence[str]]]] = None,
+    ) -> pd.DataFrame:
+        """
+        Execute end-to-end processing pipeline on provided DataFrame or internal state.
+        """
+        target_df = df if df is not None else self.get_data()
+        result = run_pipeline(
+            target_df,
+            required_columns=required_columns,
+            filter_column=filter_column,
+            filter_op=filter_op,
+            filter_value=filter_value,
+            normalize_columns=normalize_columns,
+            normalize_method=normalize_method,
+            group_by=group_by,
+            aggregations=aggregations,
+        )
+        self.log_step("run_pipeline", {"rows_out": len(result)})
+        return result
+
+    def process(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Standard implementation of BaseDataProcessor.process contract.
+        Processes the input DataFrame and records execution.
+        """
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(f"Expected pd.DataFrame, got {type(df).__name__}")
+        self.log_step("process", {"input_rows": len(df)})
+        return df.copy()
 
 
 if __name__ == "__main__":
